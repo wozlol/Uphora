@@ -288,10 +288,10 @@ extension EditorController {
     func textView(_ tv: NSTextView, doCommandBy sel: Selector) -> Bool {
         guard mdDocument?.isMarkdown ?? true else { return false }
         switch sel {
-        case #selector(NSResponder.insertNewline(_:)): return handleEnter()
+        case #selector(NSResponder.insertNewline(_:)): return tableEnter() || handleEnter()
         case #selector(NSResponder.deleteBackward(_:)): return handleBackspace()
-        case #selector(NSResponder.insertTab(_:)): return indentLists(1)
-        case #selector(NSResponder.insertBacktab(_:)): return indentLists(-1)
+        case #selector(NSResponder.insertTab(_:)): return tableTab(1) || indentLists(1)
+        case #selector(NSResponder.insertBacktab(_:)): return tableTab(-1) || indentLists(-1)
         default: return false
         }
     }
@@ -311,7 +311,15 @@ extension EditorController: NSUserInterfaceValidations {
         let fmt: [Selector] = [#selector(fmtBold(_:)), #selector(fmtItalic(_:)), #selector(fmtStrike(_:)), #selector(fmtCode(_:)),
                                #selector(fmtLink(_:)), #selector(fmtHeading(_:)), #selector(fmtBullet(_:)), #selector(fmtNumber(_:)),
                                #selector(fmtTask(_:)), #selector(fmtQuote(_:)), #selector(fmtCodeBlock(_:)), #selector(fmtRule(_:))]
-        if fmt.contains(a) { return mdDocument?.isMarkdown ?? true }
+        if a == #selector(togglePreview(_:)) {
+            (item as? NSMenuItem)?.state = previewing ? .on : .off
+            return mdDocument?.isMarkdown ?? true
+        }
+        if fmt.contains(a) || a == #selector(fmtTable(_:)) || a == #selector(fmtImage(_:)) { return !previewing && (mdDocument?.isMarkdown ?? true) }
+        let ops: [Selector] = [#selector(tblRowAbove(_:)), #selector(tblRowBelow(_:)), #selector(tblDeleteRow(_:)), #selector(tblColLeft(_:)),
+                               #selector(tblColRight(_:)), #selector(tblDeleteCol(_:)), #selector(tblAlignLeft(_:)), #selector(tblAlignCenter(_:)),
+                               #selector(tblAlignRight(_:)), #selector(tblAlignNone(_:)), #selector(tblDelete(_:))]
+        if ops.contains(a) { return !previewing && tableContext() != nil }
         return true
     }
 }
@@ -329,7 +337,8 @@ extension EditorController: NSToolbarDelegate {
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         let i = NSToolbarItem.Identifier.self
         return [i.init("style"), .space, i.init("bold"), i.init("italic"), i.init("strike"), i.init("code"), i.init("link"), .space,
-                i.init("bullet"), i.init("number"), i.init("task"), i.init("quote"), .space, i.init("codeblock"), i.init("rule")]
+                i.init("bullet"), i.init("number"), i.init("task"), i.init("quote"), .space, i.init("codeblock"), i.init("rule"), .space,
+                i.init("table"), i.init("tabletools"), i.init("image"), .space, i.init("preview")]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -354,7 +363,19 @@ extension EditorController: NSToolbarDelegate {
             item.toolTip = "Paragraph style"
             return item
         }
+        if id.rawValue == "tabletools" {
+            let mi = NSMenuToolbarItem(itemIdentifier: id)
+            mi.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "Table Tools")
+            mi.label = "Table Tools"
+            mi.toolTip = "Table Tools: add and delete rows and columns, align columns"
+            mi.menu = tableMenu()
+            mi.showsIndicator = true
+            return mi
+        }
         let table: [String: (String, String, Selector)] = [
+            "table": ("tablecells", "Insert Table", #selector(fmtTable(_:))),
+            "image": ("photo", "Insert Image", #selector(fmtImage(_:))),
+            "preview": ("eye", "GitHub View", #selector(togglePreview(_:))),
             "bold": ("bold", "Bold", #selector(fmtBold(_:))),
             "italic": ("italic", "Italic", #selector(fmtItalic(_:))),
             "strike": ("strikethrough", "Strikethrough", #selector(fmtStrike(_:))),

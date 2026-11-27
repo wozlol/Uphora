@@ -2,6 +2,7 @@ import AppKit
 
 extension Notification.Name {
     static let prefsChanged = Notification.Name("UphoraPrefsChanged")
+    static let themeChanged = Notification.Name("UphoraThemeChanged")
 }
 
 enum Prefs {
@@ -62,18 +63,21 @@ final class EditorController: NSWindowController, NSTextViewDelegate {
     let scroll: NSScrollView
     var lastActive = NSRange(location: 0, length: 0)
     var stylePopup: NSPopUpButton?
+    var formatting = false
+    var previewing = false
+    let preview: PreviewView
 
     var mdDocument: MDDocument? { document as? MDDocument }
 
     init(document: MDDocument) {
         let storage = NSTextStorage()
-        let layout = NSLayoutManager()
+        let layout = EditorLayoutManager()
         let container = NSTextContainer(size: NSSize(width: 800, height: 1e7))
         container.lineFragmentPadding = 0
         storage.addLayoutManager(layout)
         layout.addTextContainer(container)
 
-        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: 900, height: 700), textContainer: container)
+        let tv = EditorTextView(frame: NSRect(x: 0, y: 0, width: 900, height: 700), textContainer: container)
         tv.isRichText = false
         tv.importsGraphics = false
         tv.allowsUndo = true
@@ -83,6 +87,8 @@ final class EditorController: NSWindowController, NSTextViewDelegate {
         tv.isAutomaticDashSubstitutionEnabled = false
         tv.isAutomaticTextReplacementEnabled = false
         tv.isAutomaticSpellingCorrectionEnabled = false
+        tv.isContinuousSpellCheckingEnabled = true
+        tv.isGrammarCheckingEnabled = false
         tv.isAutomaticLinkDetectionEnabled = false
         tv.isVerticallyResizable = true
         tv.minSize = NSSize(width: 0, height: 0)
@@ -99,11 +105,21 @@ final class EditorController: NSWindowController, NSTextViewDelegate {
         sv.backgroundColor = .textBackgroundColor
         scroll = sv
 
+        let pv = PreviewView(frame: .zero)
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 720),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
                          backing: .buffered, defer: false)
-        w.contentView = sv
+        let holder = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 720))
+        sv.frame = holder.bounds
+        sv.autoresizingMask = [.width, .height]
+        holder.addSubview(sv)
+        pv.frame = holder.bounds
+        pv.autoresizingMask = [.width, .height]
+        pv.isHidden = true
+        holder.addSubview(pv)
+        w.contentView = holder
         w.minSize = NSSize(width: 360, height: 240)
+        preview = pv
         super.init(window: w)
         w.toolbar = makeToolbar()
         w.toolbarStyle = .unified
@@ -115,15 +131,35 @@ final class EditorController: NSWindowController, NSTextViewDelegate {
                                                name: NSView.frameDidChangeNotification, object: sv.contentView)
         NotificationCenter.default.addObserver(self, selector: #selector(refresh),
                                                name: .prefsChanged, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(restyleNow),
+                                               name: .imageLoaded, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(themeChanged),
+                                               name: .themeChanged, object: nil)
         load(document.text)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     func load(_ s: String) {
-        textView.string = s
+        textView.string = (mdDocument?.isMarkdown ?? true) ? Table.tidy(s, maxChars: tableMaxChars) : s
         textView.undoManager?.removeAllActions()
         refresh()
+    }
+
+    @objc func restyleNow() { restyle() }
+
+    @objc func themeChanged() { if previewing { showPreview() } }
+
+    private func showPreview() {
+        preview.show(markdown: textView.string, baseURL: mdDocument?.fileURL?.deletingLastPathComponent())
+    }
+
+    @objc func togglePreview(_ sender: Any?) {
+        previewing.toggle()
+        if previewing { showPreview() }
+        preview.isHidden = !previewing
+        scroll.isHidden = previewing
+        if !previewing { window?.makeFirstResponder(textView) }
     }
 
     @objc func refresh() {
@@ -158,7 +194,11 @@ final class EditorController: NSWindowController, NSTextViewDelegate {
         let size = Prefs.size
         let sel = textView.selectedRange()
         if mdDocument?.isMarkdown ?? true {
-            MarkdownStyler(storage: storage, size: size, selection: sel).run()
+            let cw = textView.textContainer?.containerSize.width ?? 600
+            let maxW = cw > 5000 ? 600 : cw
+            MarkdownStyler(storage: storage, size: size, selection: sel,
+                           baseURL: mdDocument?.fileURL?.deletingLastPathComponent(), maxImageWidth: maxW,
+                           maxTableChars: tableMaxChars).run()
         } else {
             storage.setAttributes([
                 .font: NSFont.systemFont(ofSize: size),
@@ -172,10 +212,14 @@ final class EditorController: NSWindowController, NSTextViewDelegate {
             .paragraphStyle: MarkdownStyler.paragraph(size: size),
         ]
         lastActive = (storage.string as NSString).lineRange(for: sel)
+        (textView as? EditorTextView)?.markdownMode = mdDocument?.isMarkdown ?? true
         updateStyleUI()
     }
 
-    func textDidChange(_ notification: Notification) { restyle() }
+    func textDidChange(_ notification: Notification) {
+        realignTable()
+        restyle()
+    }
 
     func textViewDidChangeSelection(_ notification: Notification) {
         guard mdDocument?.isMarkdown ?? true else { return }
@@ -187,7 +231,32 @@ final class EditorController: NSWindowController, NSTextViewDelegate {
     func undoManager(for view: NSTextView) -> UndoManager? { document?.undoManager }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu.title == "GitHub View Theme" else { return }
+        menu.removeAllItems()
+        for t in Themes.all() {
+            let i = NSMenuItem(title: t.name, action: #selector(chooseTheme(_:)), keyEquivalent: "")
+            i.target = self
+            i.state = t.name == Themes.current ? .on : .off
+            menu.addItem(i)
+        }
+        menu.addItem(.separator())
+        let open = NSMenuItem(title: "Open Themes Folder", action: #selector(openThemesFolder(_:)), keyEquivalent: "")
+        open.target = self
+        menu.addItem(open)
+    }
+
+    @objc func chooseTheme(_ sender: NSMenuItem) {
+        Themes.current = sender.title
+        NotificationCenter.default.post(name: .themeChanged, object: nil)
+    }
+
+    @objc func openThemesFolder(_ sender: Any?) {
+        try? FileManager.default.createDirectory(at: Themes.folder, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(Themes.folder)
+    }
+
     func applicationWillFinishLaunching(_ notification: Notification) { buildMenu() }
 
     @objc func toggleWrap(_ sender: Any?) { Prefs.wrap.toggle() }
@@ -249,11 +318,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         edit.addItem(.separator())
         let find = Selector(("performTextFinderAction:"))
         add(edit, "Find…", find, "f", tag: 1)
+        add(edit, "Find and Replace…", find, "f", [.command, .option], tag: 12)
         add(edit, "Find Next", find, "g", tag: 2)
         add(edit, "Find Previous", find, "G", [.command, .shift], tag: 3)
 
         let view = submenu(main, "View")
         add(view, "Word Wrap", #selector(toggleWrap(_:)), "w", [.command, .option], target: self)
+        add(view, "GitHub View", #selector(EditorController.togglePreview(_:)), "p", [.command, .option])
+        let themes = submenu(view, "GitHub View Theme")
+        themes.delegate = self
         view.addItem(.separator())
         add(view, "Bigger Text", #selector(bigger(_:)), "+", target: self)
         add(view, "Smaller Text", #selector(smaller(_:)), "-", target: self)
@@ -277,6 +350,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         add(fmt, "Quote", #selector(EditorController.fmtQuote(_:)), "q", [.command, .option])
         add(fmt, "Code Block", #selector(EditorController.fmtCodeBlock(_:)), "c", [.command, .option])
         add(fmt, "Horizontal Rule", #selector(EditorController.fmtRule(_:)), "-", [.command, .option])
+
+        fmt.addItem(.separator())
+        add(fmt, "Insert Table", #selector(EditorController.fmtTable(_:)), "t", [.command, .option])
+        add(fmt, "Insert Image…", #selector(EditorController.fmtImage(_:)), "i", [.command, .option])
+        let tbl = submenu(fmt, "Table")
+        add(tbl, "Add Row Above", #selector(EditorController.tblRowAbove(_:)))
+        add(tbl, "Add Row Below", #selector(EditorController.tblRowBelow(_:)))
+        add(tbl, "Delete Row", #selector(EditorController.tblDeleteRow(_:)))
+        tbl.addItem(.separator())
+        add(tbl, "Add Column Left", #selector(EditorController.tblColLeft(_:)))
+        add(tbl, "Add Column Right", #selector(EditorController.tblColRight(_:)))
+        add(tbl, "Delete Column", #selector(EditorController.tblDeleteCol(_:)))
+        tbl.addItem(.separator())
+        add(tbl, "Align Column Left", #selector(EditorController.tblAlignLeft(_:)))
+        add(tbl, "Align Column Center", #selector(EditorController.tblAlignCenter(_:)))
+        add(tbl, "Align Column Right", #selector(EditorController.tblAlignRight(_:)))
+        add(tbl, "Clear Column Alignment", #selector(EditorController.tblAlignNone(_:)))
+        tbl.addItem(.separator())
+        add(tbl, "Delete Table", #selector(EditorController.tblDelete(_:)))
 
         let window = submenu(main, "Window")
         add(window, "Minimize", #selector(NSWindow.performMiniaturize(_:)), "m")
