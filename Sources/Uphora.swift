@@ -13,6 +13,10 @@ enum Prefs {
             NotificationCenter.default.post(name: .prefsChanged, object: nil)
         }
     }
+    static var clickOpensLinks: Bool {
+        get { UserDefaults.standard.object(forKey: "clickOpensLinks") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "clickOpensLinks") }
+    }
     static var size: CGFloat {
         get {
             let v = UserDefaults.standard.double(forKey: "size")
@@ -125,6 +129,7 @@ final class EditorController: NSWindowController, NSTextViewDelegate {
         w.toolbarStyle = .unified
         shouldCascadeWindows = true
         tv.delegate = self
+        tv.openLink = { [weak self] in self?.openLink($0) }
 
         sv.contentView.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(refresh),
@@ -213,6 +218,7 @@ final class EditorController: NSWindowController, NSTextViewDelegate {
         ]
         lastActive = (storage.string as NSString).lineRange(for: sel)
         (textView as? EditorTextView)?.markdownMode = mdDocument?.isMarkdown ?? true
+        window?.invalidateCursorRects(for: textView)
         updateStyleUI()
     }
 
@@ -260,12 +266,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     func applicationWillFinishLaunching(_ notification: Notification) { buildMenu() }
 
     @objc func toggleWrap(_ sender: Any?) { Prefs.wrap.toggle() }
+    @objc func toggleClickLinks(_ sender: Any?) { Prefs.clickOpensLinks.toggle() }
     @objc func bigger(_ sender: Any?) { Prefs.size += 1 }
     @objc func smaller(_ sender: Any?) { Prefs.size -= 1 }
     @objc func actualSize(_ sender: Any?) { Prefs.size = 17 }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(toggleWrap(_:)) { item.state = Prefs.wrap ? .on : .off }
+        if item.action == #selector(toggleClickLinks(_:)) { item.state = Prefs.clickOpensLinks ? .on : .off }
         return true
     }
 
@@ -324,6 +332,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
         let view = submenu(main, "View")
         add(view, "Word Wrap", #selector(toggleWrap(_:)), "w", [.command, .option], target: self)
+        add(view, "Click Opens Links", #selector(toggleClickLinks(_:)), "", target: self)
         add(view, "GitHub View", #selector(EditorController.togglePreview(_:)), "p", [.command, .option])
         let themes = submenu(view, "GitHub View Theme")
         themes.delegate = self

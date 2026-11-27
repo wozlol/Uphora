@@ -54,7 +54,7 @@ struct TableLayout {
                 }
             }
         }
-        let room = max(60, available - 1)
+        let room = max(60, available - 2)
         for c in 0..<cols {
             minW[c] = min(ceil(minW[c]), max(60, room * 0.45))
             maxW[c] = max(ceil(maxW[c]), minW[c])
@@ -77,6 +77,9 @@ struct TableLayout {
             }
         }
         colWidths = widths.map { ceil($0) }
+        // Whole pixels can add up to a little more than the room. Take the excess from the widest column so the right border stays inside.
+        let over = colWidths.reduce(0, +) - room
+        if over > 0, let widest = colWidths.indices.max(by: { colWidths[$0] < colWidths[$1] }) { colWidths[widest] -= over }
         rowHeights = cells.map { row in
             let h = row.enumerated().map { c, cell in
                 ceil(cell.boundingRect(with: NSSize(width: colWidths[c] - 2 * hp, height: 1e6), options: [.usesLineFragmentOrigin, .usesFontLeading]).height)
@@ -247,6 +250,22 @@ final class EditorLayoutManager: NSLayoutManager {
 
 final class EditorTextView: NSTextView {
     var markdownMode = true
+    var openLink: ((String) -> Void)?
+
+    /// Links show a pointing hand when a click would open them.
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard markdownMode, Prefs.clickOpensLinks, let storage = textStorage, let lm = layoutManager, let tc = textContainer, storage.length > 0 else { return }
+        let o = textContainerOrigin
+        let caretLine = (string as NSString).lineRange(for: selectedRange())
+        storage.enumerateAttribute(.uphoraLink, in: NSRange(location: 0, length: storage.length), options: []) { v, r, _ in
+            guard v != nil, NSIntersectionRange(r, caretLine).length == 0, !(r.location >= caretLine.location && r.location <= NSMaxRange(caretLine)) else { return }
+            let gr = lm.glyphRange(forCharacterRange: r, actualCharacterRange: nil)
+            lm.enumerateEnclosingRects(forGlyphRange: gr, withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0), in: tc) { rect, _ in
+                self.addCursorRect(rect.offsetBy(dx: o.x, dy: o.y), cursor: .pointingHand)
+            }
+        }
+    }
 
     private func index(at event: NSEvent) -> Int? {
         guard let lm = layoutManager, let tc = textContainer, let storage = textStorage, storage.length > 0 else { return nil }
@@ -280,6 +299,27 @@ final class EditorTextView: NSTextView {
         var row = 0
         var y = rect.minY
         for (i, h) in L.rowHeights.enumerated() { if pt.y >= y { row = i }; y += h }
+        if event.clickCount == 1, event.modifierFlags.contains(.command) || Prefs.clickOpensLinks {
+            let colX = rect.minX + L.colWidths.prefix(col).reduce(0, +)
+            let rowY = rect.minY + L.rowHeights.prefix(row).reduce(0, +)
+            let local = NSPoint(x: pt.x - colX - TableLayout.hPad, y: pt.y - rowY - TableLayout.vPad)
+            let st = NSTextStorage(attributedString: ref.cells[row][col])
+            let lm2 = NSLayoutManager()
+            let tc2 = NSTextContainer(size: NSSize(width: L.colWidths[col] - 2 * TableLayout.hPad, height: 1e6))
+            tc2.lineFragmentPadding = 0
+            lm2.addTextContainer(tc2)
+            st.addLayoutManager(lm2)
+            if st.length > 0, local.x >= 0, local.y >= 0 {
+                var f: CGFloat = 0
+                let i = lm2.characterIndex(for: local, in: tc2, fractionOfDistanceBetweenInsertionPoints: &f)
+                if i < st.length,
+                   lm2.boundingRect(forGlyphRange: NSRange(location: lm2.glyphIndexForCharacter(at: i), length: 1), in: tc2).insetBy(dx: -1, dy: -1).contains(local),
+                   let link = st.attribute(.uphoraLink, at: i, effectiveRange: nil) as? String {
+                    openLink?(link)
+                    return true
+                }
+            }
+        }
         let text = string as NSString
         guard let block = Table.find(in: text).first(where: { $0.lines[0].location == r.location }) else { return false }
         let lr = block.lines[row == 0 ? 0 : row + 1]
@@ -296,11 +336,12 @@ final class EditorTextView: NSTextView {
     override func mouseDown(with event: NSEvent) {
         if markdownMode, clickTable(event) { return }
         if markdownMode, event.clickCount == 1, let idx = index(at: event), let storage = textStorage {
-            if event.modifierFlags.contains(.command),
-               let s = storage.attribute(.uphoraLink, at: idx, effectiveRange: nil) as? String,
-               let u = URL(string: s) {
-                NSWorkspace.shared.open(u)
-                return
+            if let s = storage.attribute(.uphoraLink, at: idx, effectiveRange: nil) as? String {
+                let lineHasCaret = (string as NSString).lineRange(for: selectedRange()).contains(idx)
+                if event.modifierFlags.contains(.command) || (Prefs.clickOpensLinks && !lineHasCaret) {
+                    openLink?(s)
+                    return
+                }
             }
             if toggleTask(at: idx) { return }
         }

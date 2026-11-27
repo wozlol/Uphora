@@ -133,7 +133,8 @@ final class PreviewView: NSView, WKNavigationDelegate {
     deinit { try? FileManager.default.removeItem(at: tempFile) }
 
     func show(markdown: String, baseURL: URL?) {
-        let body = MarkdownHTML.shared.html(markdown)
+        // Links to #headings must stay on this page, so they point at the page file itself.
+        let body = MarkdownHTML.shared.html(markdown).replacingOccurrences(of: "href=\"#", with: "href=\"\(tempFile.absoluteString)#")
         let t = Themes.css(for: Themes.current)
         let bg = t.background.isEmpty
             ? "body{background:#ffffff}@media (prefers-color-scheme: dark){body{background:#0d1117}}"
